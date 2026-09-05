@@ -13,7 +13,7 @@ from uuid import UUID
 
 from digues_app.source import CouchDBClient, connect_couchdb
 from digues_app.target import PostgreSQLConfig, configure_extension_search_path
-from digues_app.target.schema import EXPECTED_TABLES
+from digues_app.target.schema import MIGRATION_TABLES
 
 from .amenagements import (
     AMENAGEMENT_SOURCE_CLASSES,
@@ -1031,7 +1031,7 @@ INSERT_STATEMENTS = {
 
 def ensure_target_empty(cursor: Any) -> None:
     non_empty: list[str] = []
-    for table in EXPECTED_TABLES:
+    for table in MIGRATION_TABLES:
         cursor.execute(f"SELECT COUNT(*) FROM public.{table}")
         row = cursor.fetchone()
         if row and int(row[0]) > 0:

@@ -15,7 +15,7 @@ from digues_app.migration.core import (
     validate_troncon_wkt,
 )
 from digues_app.migration.crs import CRSInfo
-from digues_app.target.schema import EXPECTED_TABLES
+from digues_app.target.schema import MIGRATION_TABLES
 
 
 IDS = {
@@ -433,7 +433,7 @@ class CoreTransformationTest(unittest.TestCase):
 
     def test_target_non_empty_is_refused_before_insert(self):
         prepared = prepare_core_migration(source_fixture())
-        cursor = FakeMigrationCursor([1] + [0] * (len(EXPECTED_TABLES) - 1))
+        cursor = FakeMigrationCursor([1] + [0] * (len(MIGRATION_TABLES) - 1))
         connection = FakeMigrationConnection(cursor)
 
         with self.assertRaises(TargetNotEmptyError):
@@ -446,7 +446,7 @@ class CoreTransformationTest(unittest.TestCase):
 
     def test_target_transaction_rolls_back_on_insert_error(self):
         prepared = prepare_core_migration(source_fixture())
-        cursor = FakeMigrationCursor([0] * len(EXPECTED_TABLES), fail_on_insert=True)
+        cursor = FakeMigrationCursor([0] * len(MIGRATION_TABLES), fail_on_insert=True)
         connection = FakeMigrationConnection(cursor)
 
         with self.assertRaisesRegex(CoreMigrationError, "annulée"):

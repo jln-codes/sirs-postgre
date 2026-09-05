@@ -593,10 +593,49 @@ TABLE_DEFINITIONS = {
                 )
         )
     """,
+    "knowledge_documents": """
+        CREATE TABLE IF NOT EXISTS public.knowledge_documents (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            source_type TEXT NOT NULL,
+            path TEXT NOT NULL,
+            title TEXT NOT NULL,
+            checksum TEXT NOT NULL,
+            content TEXT NOT NULL,
+            indexed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+            CONSTRAINT knowledge_documents_source_path_unique
+                UNIQUE (source_type, path),
+            CONSTRAINT knowledge_documents_checksum_check
+                CHECK (checksum ~ '^[0-9a-f]{64}$')
+        )
+    """,
+    "knowledge_chunks": """
+        CREATE TABLE IF NOT EXISTS public.knowledge_chunks (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            document_id UUID NOT NULL,
+            ordinal INTEGER NOT NULL,
+            heading TEXT NULL,
+            content TEXT NOT NULL,
+            search_vector TSVECTOR NOT NULL,
+            metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+            CONSTRAINT knowledge_chunks_document_fk
+                FOREIGN KEY (document_id)
+                REFERENCES public.knowledge_documents (id)
+                ON DELETE CASCADE,
+            CONSTRAINT knowledge_chunks_document_ordinal_unique
+                UNIQUE (document_id, ordinal),
+            CONSTRAINT knowledge_chunks_ordinal_check CHECK (ordinal >= 0),
+            CONSTRAINT knowledge_chunks_content_check CHECK (btrim(content) <> '')
+        )
+    """,
     **DESORDRE_REPERAGE_TABLE_DEFINITIONS,
 }
 
 EXPECTED_TABLES = tuple(TABLE_DEFINITIONS)
+MIGRATION_TABLES = tuple(
+    table for table in EXPECTED_TABLES if table not in {"knowledge_documents", "knowledge_chunks"}
+)
 
 # Le cycle troncons <-> systemes_reperage impose d'ajouter la FK du système par
 # défaut après la création des deux tables. Le bloc reste idempotent afin que
@@ -637,6 +676,14 @@ INDEX_DEFINITIONS = {
     "link_systemes_reperage_bornes_borne_idx": """
         CREATE INDEX IF NOT EXISTS link_systemes_reperage_bornes_borne_idx
         ON public.link_systemes_reperage_bornes (borne_id)
+    """,
+    "knowledge_chunks_search_vector_idx": """
+        CREATE INDEX IF NOT EXISTS knowledge_chunks_search_vector_idx
+        ON public.knowledge_chunks USING GIN (search_vector)
+    """,
+    "knowledge_documents_source_type_idx": """
+        CREATE INDEX IF NOT EXISTS knowledge_documents_source_type_idx
+        ON public.knowledge_documents (source_type)
     """,
     **DESORDRE_REPERAGE_INDEX_DEFINITIONS,
 }

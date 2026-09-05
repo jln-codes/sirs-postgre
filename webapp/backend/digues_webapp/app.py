@@ -273,6 +273,14 @@ def create_app() -> FastAPI:
         return AiChatResponse(
             answer=result.answer,
             executed_queries=[{"sql": sql} for sql in result.executed_queries],
+            consulted_sources=[
+                {
+                    "title": source.title,
+                    "path": source.path,
+                    "heading": source.heading,
+                }
+                for source in result.consulted_sources
+            ],
         ).model_dump()
 
     @application.get("/api/troncons", response_class=GeoJSONResponse)

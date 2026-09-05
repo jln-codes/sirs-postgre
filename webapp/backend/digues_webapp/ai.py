@@ -1,4 +1,4 @@
-"""Adaptateur Mistral avec consultation SQL SIRS strictement en lecture seule."""
+"""Adaptateur Mistral avec outils SIRS strictement en lecture seule."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import requests
 from dotenv import load_dotenv
 
 from .prompts import SIRS_SYSTEM_PROMPT
+from .knowledge.search import KnowledgeSearchError, search_sirs_knowledge
 from .readonly_sql import (
     ReadonlySqlExecutionError,
     ReadonlySqlValidationError,
@@ -27,6 +28,7 @@ MISTRAL_MODEL = "mistral-small-latest"
 MISTRAL_TIMEOUT_SECONDS = 30
 MISTRAL_MAX_TOOL_CALLS = 5
 SIRS_SQL_TOOL_NAME = "query_sirs_database"
+SIRS_KNOWLEDGE_TOOL_NAME = "search_sirs_knowledge"
 SIRS_SQL_TOOL = {
     "type": "function",
     "function": {
@@ -52,6 +54,32 @@ SIRS_SQL_TOOL = {
         },
     },
 }
+SIRS_KNOWLEDGE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": SIRS_KNOWLEDGE_TOOL_NAME,
+        "description": (
+            "Recherche des passages dans la documentation officielle versionnée "
+            "du projet SIRS (README.md, docs/**/*.md, webapp/README.md et "
+            "webapp/docs/**/*.md). À utiliser pour les "
+            "questions sur l’architecture, le fonctionnement, le modèle métier "
+            "documenté et les procédures du projet. Cette documentation locale "
+            "n’est pas une source réglementaire externe."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Termes précis à rechercher dans la documentation SIRS.",
+                }
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+}
+SIRS_TOOLS = [SIRS_SQL_TOOL, SIRS_KNOWLEDGE_TOOL]
 
 
 class AiServiceError(RuntimeError):
@@ -64,10 +92,18 @@ class AiServiceError(RuntimeError):
 
 @dataclass(frozen=True)
 class AiChatResult:
-    """Réponse textuelle et SQL exécutés avec succès pour cette seule requête."""
+    """Réponse et consultations réussies pour cette seule requête."""
 
     answer: str
     executed_queries: tuple[str, ...]
+    consulted_sources: tuple["AiConsultedSource", ...] = ()
+
+
+@dataclass(frozen=True)
+class AiConsultedSource:
+    title: str
+    path: str
+    heading: str | None
 
 
 def _api_key() -> str:
@@ -125,7 +161,7 @@ def _completion(
             json={
                 "model": MISTRAL_MODEL,
                 "messages": mistral_messages,
-                "tools": [SIRS_SQL_TOOL],
+                "tools": SIRS_TOOLS,
                 "tool_choice": tool_choice,
                 "parallel_tool_calls": True,
             },
@@ -224,6 +260,71 @@ def _run_sql_tool(
         return name, _tool_error("La requête de lecture a échoué."), None
 
 
+def _run_knowledge_tool(
+    tool_call: dict[str, Any],
+) -> tuple[str, dict[str, Any], tuple[tuple[str, AiConsultedSource], ...]]:
+    try:
+        function = tool_call["function"]
+        name = function["name"]
+        arguments_json = function["arguments"]
+    except (KeyError, TypeError) as exc:
+        raise AiServiceError("Réponse d’outil invalide du service IA.") from exc
+    if not isinstance(arguments_json, str):
+        return name, _tool_error("Arguments JSON invalides pour la recherche."), ()
+    try:
+        arguments = json.loads(arguments_json)
+    except (TypeError, ValueError):
+        return name, _tool_error("Arguments JSON invalides pour la recherche."), ()
+    if not isinstance(arguments, dict) or set(arguments) != {"query"}:
+        return name, _tool_error("L’argument query est obligatoire et doit être unique."), ()
+    query = arguments["query"]
+    if not isinstance(query, str) or not query.strip():
+        return name, _tool_error("L’argument query doit être une chaîne non vide."), ()
+    try:
+        result = search_sirs_knowledge(query)
+    except KnowledgeSearchError as exc:
+        return name, _tool_error(str(exc)), ()
+    except Exception as exc:  # protection de frontière, sans fuite vers le navigateur
+        LOGGER.error("Échec interne de l’outil documentaire: %s", type(exc).__name__)
+        return name, _tool_error("La recherche documentaire a échoué."), ()
+
+    sources: list[tuple[str, AiConsultedSource]] = []
+    for item in result.get("results", []):
+        if not isinstance(item, dict):
+            continue
+        chunk_id = item.get("chunk_id")
+        title = item.get("title")
+        path = item.get("path")
+        heading = item.get("heading")
+        if not all(isinstance(value, str) and value for value in (chunk_id, title, path)):
+            continue
+        sources.append((
+            chunk_id,
+            AiConsultedSource(
+                title=title,
+                path=path,
+                heading=heading if isinstance(heading, str) and heading else None,
+            ),
+        ))
+    return name, result, tuple(sources)
+
+
+def _run_tool(
+    tool_call: dict[str, Any],
+) -> tuple[str, dict[str, Any], str | None, tuple[tuple[str, AiConsultedSource], ...]]:
+    function = tool_call.get("function")
+    name = function.get("name") if isinstance(function, dict) else None
+    if name == SIRS_SQL_TOOL_NAME:
+        function_name, result, executed_sql = _run_sql_tool(tool_call)
+        return function_name, result, executed_sql, ()
+    if name == SIRS_KNOWLEDGE_TOOL_NAME:
+        function_name, result, sources = _run_knowledge_tool(tool_call)
+        return function_name, result, None, sources
+    if not isinstance(name, str) or not name:
+        raise AiServiceError("Réponse d’outil invalide du service IA.")
+    return name, _tool_error("Outil non autorisé."), None, ()
+
+
 def chat_with_mistral(
     messages: list[dict[str, str]], schema_context: str
 ) -> AiChatResult:
@@ -241,6 +342,8 @@ def chat_with_mistral(
     tool_call_count = 0
     force_final_answer = False
     executed_queries: list[str] = []
+    consulted_sources: list[AiConsultedSource] = []
+    consulted_chunk_ids: set[str] = set()
 
     while True:
         message = _completion(
@@ -255,6 +358,7 @@ def chat_with_mistral(
             return AiChatResult(
                 answer=_answer_from_message(message),
                 executed_queries=tuple(executed_queries),
+                consulted_sources=tuple(consulted_sources),
             )
         if force_final_answer:
             raise AiServiceError(
@@ -280,13 +384,17 @@ def chat_with_mistral(
 
             if tool_call_count >= MISTRAL_MAX_TOOL_CALLS:
                 result = _tool_error(
-                    "Limite de consultations SQL atteinte pour cette question."
+                    "Limite de consultations atteinte pour cette question."
                 )
             else:
                 tool_call_count += 1
-                function_name, result, executed_sql = _run_sql_tool(tool_call)
+                function_name, result, executed_sql, sources = _run_tool(tool_call)
                 if executed_sql is not None:
                     executed_queries.append(executed_sql)
+                for chunk_id, source in sources:
+                    if chunk_id not in consulted_chunk_ids:
+                        consulted_chunk_ids.add(chunk_id)
+                        consulted_sources.append(source)
 
             normalized_calls.append({
                 "id": tool_call_id,

@@ -87,6 +87,31 @@ Seules les métadonnées de structure sont utilisées pour construire ce context
 
 L'assistant peut ensuite consulter les données SIRS via l'outil serveur `query_sirs_database`. Il peut produire des requêtes de lecture, mais aucune fonction d'écriture n'est exposée à l'IA.
 
+Il peut également rechercher dans la documentation locale versionnée avec
+`search_sirs_knowledge`. Le corpus est strictement limité aux fichiers suivis
+par Git correspondant à `README.md`, `docs/**/*.md`, `webapp/README.md` et
+`webapp/docs/**/*.md`. Les fichiers non Markdown, notamment le Swagger ARPEGE,
+restent exclus. Les documents et leurs passages ordonnés sont indexés dans
+PostgreSQL par la commande explicite :
+
+```bash
+digues-app init-schema
+sirs-index-knowledge
+```
+
+L'indexeur s'exécute depuis la racine d'un checkout Git. Un autre checkout peut
+être désigné côté serveur avec `SIRS_REPOSITORY_ROOT`.
+
+La commande calcule les checksums SHA-256 et ne réindexe que les fichiers
+nouveaux ou modifiés ; les documents supprimés du dépôt sont retirés de
+l'index. La recherche utilise PostgreSQL Full Text Search avec la configuration
+française lorsqu'elle est disponible et `simple` comme fallback portable.
+Cette première version n'utilise ni `pgvector` ni embeddings.
+
+Les passages réellement transmis à Mistral sont signalés dans le chat sous
+`Sources consultées`. Aucune source web, réglementaire externe ou documentaire
+utilisateur n'est disponible dans ce lot.
+
 Toute modification persistante reste une action humaine explicite.
 
 Les réponses de l'assistant prennent en charge un sous-ensemble Markdown rendu par liste blanche, sans injection de HTML arbitraire. Les blocs de code peuvent être copiés, mais ils ne peuvent être ni exécutés ni transférés automatiquement vers la vue Requêtes. Une requête de mutation éventuellement proposée dans un bloc reste du texte sous la responsabilité de l'utilisateur.
@@ -139,7 +164,7 @@ Elle n'est pas encore :
 La documentation fonctionnelle et la procédure de recette complètes se trouvent dans :
 
 ```text
-docs/interface_web_experimentale.md
+webapp/README.md
 ```
 
 ---

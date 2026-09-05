@@ -71,6 +71,16 @@ class AiExecutedQuery(BaseModel):
     sql: str
 
 
+class AiConsultedSource(BaseModel):
+    """Référence documentaire effectivement transmise au modèle."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    path: str
+    heading: str | None = None
+
+
 class AiChatResponse(BaseModel):
     """Réponse publique sans résultat SQL ni structure interne Mistral."""
 
@@ -78,6 +88,7 @@ class AiChatResponse(BaseModel):
 
     answer: str
     executed_queries: list[AiExecutedQuery] = Field(default_factory=list)
+    consulted_sources: list[AiConsultedSource] = Field(default_factory=list)
 
 
 class NamedObjectCreate(BaseModel):

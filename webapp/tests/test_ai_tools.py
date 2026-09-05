@@ -5,7 +5,10 @@ from unittest.mock import Mock, call, patch
 
 from digues_webapp.ai import (
     MISTRAL_MAX_TOOL_CALLS,
+    SIRS_KNOWLEDGE_TOOL,
+    SIRS_KNOWLEDGE_TOOL_NAME,
     SIRS_SQL_TOOL,
+    SIRS_TOOLS,
     SIRS_SQL_TOOL_NAME,
     AiServiceError,
     chat_with_mistral,
@@ -59,7 +62,7 @@ class MistralSqlToolTest(unittest.TestCase):
         self.assertEqual(answer.executed_queries, ())
         execute.assert_not_called()
         request = mocked_post.call_args.kwargs["json"]
-        self.assertEqual(request["tools"], [SIRS_SQL_TOOL])
+        self.assertEqual(request["tools"], SIRS_TOOLS)
         self.assertEqual(request["tool_choice"], "auto")
         self.assertTrue(request["parallel_tool_calls"])
         system_prompt = request["messages"][0]["content"]
@@ -69,6 +72,140 @@ class MistralSqlToolTest(unittest.TestCase):
         parameters = SIRS_SQL_TOOL["function"]["parameters"]
         self.assertEqual(parameters["required"], ["sql"])
         self.assertFalse(parameters["additionalProperties"])
+        self.assertEqual(SIRS_KNOWLEDGE_TOOL["function"]["parameters"]["required"], ["query"])
+
+    def test_document_search_result_is_returned_with_source_and_matching_id(self):
+        first = mistral_response({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [tool_call(
+                "knowledge-1",
+                '{"query":"architecture webapp"}',
+                name=SIRS_KNOWLEDGE_TOOL_NAME,
+            )],
+        })
+        final = mistral_response({"role": "assistant", "content": "Architecture trouvée."})
+        result = {"results": [{
+            "document_id": "doc-1",
+            "chunk_id": "chunk-1",
+            "title": "SIRS",
+            "path": "README.md",
+            "heading": "Architecture",
+            "content": "Le backend utilise FastAPI.",
+            "rank": 0.8,
+        }]}
+        environment, dotenv, post = self.chat([first, final])
+        with (
+            environment,
+            dotenv,
+            post as mocked_post,
+            patch("digues_webapp.ai.search_sirs_knowledge", return_value=result) as search,
+        ):
+            answer = chat_with_mistral([{"role": "user", "content": "Architecture ?"}], "schema")
+
+        search.assert_called_once_with("architecture webapp")
+        self.assertEqual(answer.executed_queries, ())
+        self.assertEqual(len(answer.consulted_sources), 1)
+        self.assertEqual(answer.consulted_sources[0].path, "README.md")
+        tool = mocked_post.call_args_list[1].kwargs["json"]["messages"][-1]
+        self.assertEqual(tool["name"], SIRS_KNOWLEDGE_TOOL_NAME)
+        self.assertEqual(tool["tool_call_id"], "knowledge-1")
+        self.assertEqual(json.loads(tool["content"]), result)
+
+    def test_empty_document_search_does_not_create_false_source(self):
+        responses = [
+            mistral_response({
+                "role": "assistant", "content": "",
+                "tool_calls": [tool_call("empty", '{"query":"absent"}', name=SIRS_KNOWLEDGE_TOOL_NAME)],
+            }),
+            mistral_response({"role": "assistant", "content": "Aucun passage."}),
+        ]
+        environment, dotenv, post = self.chat(responses)
+        with environment, dotenv, post, patch(
+            "digues_webapp.ai.search_sirs_knowledge", return_value={"results": []}
+        ):
+            answer = chat_with_mistral([{"role": "user", "content": "Question"}], "schema")
+        self.assertEqual(answer.consulted_sources, ())
+
+    def test_repeated_document_chunk_is_exposed_once(self):
+        calls = [
+            mistral_response({
+                "role": "assistant", "content": "",
+                "tool_calls": [tool_call(
+                    f"doc-{index}", '{"query":"architecture"}',
+                    name=SIRS_KNOWLEDGE_TOOL_NAME,
+                )],
+            })
+            for index in range(2)
+        ]
+        calls.append(mistral_response({"role": "assistant", "content": "Réponse."}))
+        result = {"results": [{
+            "document_id": "doc", "chunk_id": "same-chunk", "title": "README",
+            "path": "README.md", "heading": "Architecture", "content": "Texte", "rank": 1.0,
+        }]}
+        environment, dotenv, post = self.chat(calls)
+        with environment, dotenv, post, patch(
+            "digues_webapp.ai.search_sirs_knowledge", return_value=result
+        ):
+            answer = chat_with_mistral([{"role": "user", "content": "Architecture"}], "schema")
+        self.assertEqual(len(answer.consulted_sources), 1)
+
+    def test_document_then_sql_tools_preserve_both_call_ids(self):
+        responses = [
+            mistral_response({
+                "role": "assistant", "content": "",
+                "tool_calls": [tool_call("doc-call", '{"query":"systèmes"}', name=SIRS_KNOWLEDGE_TOOL_NAME)],
+            }),
+            mistral_response({
+                "role": "assistant", "content": "",
+                "tool_calls": [tool_call("sql-call", '{"sql":"SELECT COUNT(*) FROM public.systemes"}')],
+            }),
+            mistral_response({"role": "assistant", "content": "Réponse combinée."}),
+        ]
+        environment, dotenv, post = self.chat(responses)
+        document_result = {"results": [{
+            "document_id": "doc", "chunk_id": "chunk", "title": "Guide",
+            "path": "docs/guide.md", "heading": None, "content": "Systèmes", "rank": 1.0,
+        }]}
+        with (
+            environment,
+            dotenv,
+            post as mocked_post,
+            patch("digues_webapp.ai.search_sirs_knowledge", return_value=document_result),
+            patch("digues_webapp.ai.execute_readonly_query", return_value={
+                "columns": ["count"], "rows": [[3]], "truncated": False,
+            }),
+        ):
+            answer = chat_with_mistral([{"role": "user", "content": "Explique et compte"}], "schema")
+
+        self.assertEqual(answer.executed_queries, ("SELECT COUNT(*) FROM public.systemes",))
+        self.assertEqual(answer.consulted_sources[0].path, "docs/guide.md")
+        final_messages = mocked_post.call_args_list[-1].kwargs["json"]["messages"]
+        self.assertEqual(
+            [message["tool_call_id"] for message in final_messages if message["role"] == "tool"],
+            ["doc-call", "sql-call"],
+        )
+
+    def test_document_tool_rejects_arbitrary_path_argument(self):
+        responses = [
+            mistral_response({
+                "role": "assistant", "content": "",
+                "tool_calls": [tool_call(
+                    "unsafe-path", '{"query":"secret","path":"private/secret.md"}',
+                    name=SIRS_KNOWLEDGE_TOOL_NAME,
+                )],
+            }),
+            mistral_response({"role": "assistant", "content": "Refusé."}),
+        ]
+        environment, dotenv, post = self.chat(responses)
+        with environment, dotenv, post as mocked_post, patch(
+            "digues_webapp.ai.search_sirs_knowledge"
+        ) as search:
+            answer = chat_with_mistral([{"role": "user", "content": "Lis un fichier"}], "schema")
+        search.assert_not_called()
+        self.assertEqual(answer.consulted_sources, ())
+        tool = mocked_post.call_args_list[1].kwargs["json"]["messages"][-1]
+        self.assertFalse(json.loads(tool["content"])["ok"])
 
     def test_simple_sql_call_is_returned_to_mistral_with_matching_id(self):
         first = mistral_response({

@@ -17,6 +17,7 @@ from pydantic import ValidationError
 
 from digues_webapp.ai import (
     AiChatResult,
+    AiConsultedSource,
     AiServiceError,
     MISTRAL_MODEL,
     chat_with_mistral,
@@ -561,6 +562,13 @@ class AiEndpointTest(unittest.TestCase):
                 return_value=AiChatResult(
                     answer="Réponse simulée",
                     executed_queries=("SELECT 1", "SELECT 1"),
+                    consulted_sources=(
+                        AiConsultedSource(
+                            title="Architecture SIRS",
+                            path="docs/architecture.md",
+                            heading="Backend web",
+                        ),
+                    ),
                 ),
             ) as chat,
             patch(
@@ -576,6 +584,11 @@ class AiEndpointTest(unittest.TestCase):
         self.assertEqual(response, {
             "answer": "Réponse simulée",
             "executed_queries": [{"sql": "SELECT 1"}, {"sql": "SELECT 1"}],
+            "consulted_sources": [{
+                "title": "Architecture SIRS",
+                "path": "docs/architecture.md",
+                "heading": "Backend web",
+            }],
         })
         serialized = json.dumps(response)
         for forbidden in ("columns", "rows", "tool_call_id", "MISTRAL_API_KEY"):
@@ -604,7 +617,11 @@ class AiEndpointTest(unittest.TestCase):
             ]))
         self.assertEqual(
             response,
-            {"answer": "Réponse directe", "executed_queries": []},
+            {
+                "answer": "Réponse directe",
+                "executed_queries": [],
+                "consulted_sources": [],
+            },
         )
 
     def test_provider_error_is_returned_without_stack_trace(self):
@@ -1272,6 +1289,7 @@ process.stdout.write(JSON.stringify({ states, invalidations }));
         self.assertIn('role === "assistant"', script)
         self.assertIn('role === "user"', script)
         self.assertIn("body.textContent = content", script)
+        self.assertIn("consultedSources: response.consulted_sources", script)
         self.assertNotIn("body.innerHTML", script)
         self.assertNotIn("MISTRAL_API_KEY", page)
         self.assertNotIn("MISTRAL_API_KEY", script)
@@ -1525,6 +1543,94 @@ const aiConversationHistory = [];
         self.assertNotIn("Exécuter", render_source)
         self.assertNotIn("Ouvrir dans Requêtes", render_source)
         self.assertIn(".ai-sql-details summary", css)
+
+    def test_frontend_renders_safe_document_sources_separately_from_history(self):
+        script = (FRONTEND_DIRECTORY / "js" / "map.js").read_text(encoding="utf-8")
+        css = (FRONTEND_DIRECTORY / "css" / "app.css").read_text(encoding="utf-8")
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js indisponible pour le test des sources IA.")
+
+        render_source = "async function copyTextToClipboard" + script.split(
+            "async function copyTextToClipboard", 1
+        )[1].split("function setAiRequestPending", 1)[0]
+        program = render_source + r'''
+class Element {
+  constructor(tagName) {
+    this.tagName = tagName;
+    this.children = [];
+    this.listeners = {};
+    this.className = "";
+    this.classList = { add: (...names) => { this.className += names.join(" "); } };
+    this._text = "";
+    this.scrollHeight = 10;
+  }
+  append(...children) { this.children.push(...children); }
+  addEventListener(name, listener) { this.listeners[name] = listener; }
+  setAttribute(name, value) { this[name] = value; }
+  remove() {}
+  get textContent() { return this._text + this.children.map((item) => item.textContent).join(""); }
+  set textContent(value) { this._text = String(value); this.children = []; }
+}
+const document = {
+  body: new Element("body"),
+  createElement(tagName) { return new Element(tagName); },
+  execCommand() { return true; },
+};
+const navigator = {};
+const window = { setTimeout(callback) { callback(); } };
+const aiConversation = new Element("conversation");
+const aiConversationEmpty = { remove() {} };
+const aiConversationHistory = [];
+
+appendAiMessage("assistant", "Sans source");
+appendAiMessage("assistant", "Avec source", {
+  consultedSources: [{
+    title: "<img src=x onerror=alert(1)>",
+    path: "docs/<script>.md",
+    heading: "Architecture <b>serveur</b>",
+  }],
+});
+appendAiMessage("assistant", "Avec SQL et sources", {
+  executedQueries: [{ sql: "SELECT 1" }],
+  consultedSources: [
+    { title: "README", path: "README.md", heading: null },
+    { title: "Guide", path: "docs/guide.md", heading: "Procédure" },
+  ],
+});
+const none = aiConversation.children[0];
+const one = aiConversation.children[1].children[2];
+const both = aiConversation.children[2];
+process.stdout.write(JSON.stringify({
+  noSourceChildren: none.children.length,
+  oneTag: one.tagName,
+  oneSummary: one.children[0].textContent,
+  unsafeText: one.children[1].textContent,
+  unsafeChildTags: one.children[1].children.map((item) => item.tagName),
+  sqlClass: both.children[2].className,
+  sourceClass: both.children[3].className,
+  sourceSummary: both.children[3].children[0].textContent,
+  sourceCount: both.children[3].children.length - 1,
+  headinglessChildren: both.children[3].children[1].children.length,
+  history: aiConversationHistory,
+}));
+'''
+        result = json.loads(subprocess.check_output([node, "-e", program], text=True))
+        self.assertEqual(result["noSourceChildren"], 2)
+        self.assertEqual(result["oneTag"], "details")
+        self.assertEqual(result["oneSummary"], "Sources consultées — 1")
+        self.assertIn("<img src=x onerror=alert(1)>", result["unsafeText"])
+        self.assertEqual(result["unsafeChildTags"], ["strong", "code", "span"])
+        self.assertEqual(result["sqlClass"], "ai-sql-details")
+        self.assertEqual(result["sourceClass"], "ai-source-details")
+        self.assertEqual(result["sourceSummary"], "Sources consultées — 2")
+        self.assertEqual(result["sourceCount"], 2)
+        self.assertEqual(result["headinglessChildren"], 2)
+        self.assertEqual(len(result["history"]), 3)
+        self.assertTrue(all(set(item) == {"role", "content"} for item in result["history"]))
+        self.assertIn(".ai-source-details summary", css)
+        self.assertIn("title.textContent = source.title", render_source)
+        self.assertIn("path.textContent = source.path", render_source)
 
     def test_frontend_has_generic_creation_mode_and_context_prefill(self):
         page = (FRONTEND_DIRECTORY / "index.html").read_text(encoding="utf-8")

@@ -203,6 +203,13 @@ def open_read_connection() -> Iterator[Any]:
     yield from _connection(read_only=True)
 
 
+@contextmanager
+def open_write_connection() -> Iterator[Any]:
+    """Connexion explicite des tâches serveur d'administration contrôlées."""
+
+    yield from _connection(read_only=False)
+
+
 def get_connection() -> Iterator[Any]:
     """Connexion des endpoints strictement en lecture seule."""
 
@@ -213,4 +220,5 @@ def get_connection() -> Iterator[Any]:
 def get_write_connection() -> Iterator[Any]:
     """Connexion d'écriture réservée aux mutations contrôlées par PostGIS."""
 
-    yield from _connection(read_only=False)
+    with open_write_connection() as connection:
+        yield connection

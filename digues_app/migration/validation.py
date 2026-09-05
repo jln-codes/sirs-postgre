@@ -12,7 +12,7 @@ from digues_app.migration.reperage import PreparedReperageMigration
 from digues_app.migration.desordre_reperage import (
     PreparedDesordreReperageMigration,
 )
-from digues_app.target.schema import EXPECTED_TABLES
+from digues_app.target.schema import MIGRATION_TABLES
 
 
 class MigrationValidationError(RuntimeError):
@@ -243,14 +243,14 @@ def validate_core_migration(
     """Compare la cible à la source avant le commit de la transaction."""
 
     actual_counts: dict[str, int] = {}
-    for table in EXPECTED_TABLES:
+    for table in MIGRATION_TABLES:
         cursor.execute(f"SELECT COUNT(*) FROM public.{table}")
         row = cursor.fetchone()
         actual_counts[table] = int(row[0]) if row else -1
 
     count_errors = [
         f"{table}: attendu {expected_counts[table]}, obtenu {actual_counts[table]}"
-        for table in EXPECTED_TABLES
+        for table in MIGRATION_TABLES
         if actual_counts[table] != expected_counts[table]
     ]
     if count_errors:

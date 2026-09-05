@@ -17,6 +17,9 @@ dependencies = [
     "uvicorn>=0.34,<1",
 ]
 
+[project.scripts]
+sirs-index-knowledge = "digues_webapp.knowledge.indexer:main"
+
 [tool.setuptools.packages.find]
 where = ["backend"]
 include = ["digues_webapp*"]

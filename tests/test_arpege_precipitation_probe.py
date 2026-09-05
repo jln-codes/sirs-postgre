@@ -1,3 +1,4 @@
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
 import importlib.util
 import io
@@ -109,6 +110,7 @@ class ArpegePrecipitationProbeTest(unittest.TestCase):
 
     def test_getcoverage_uses_repeated_unquoted_subsets(self):
         class Response:
+            status_code = 200
             content = b""
 
             def raise_for_status(self):
@@ -126,7 +128,7 @@ class ArpegePrecipitationProbeTest(unittest.TestCase):
         session = Session()
         client = probe.WcsClient("secret-test", session=session)
         valid_time = datetime(2026, 9, 6, tzinfo=timezone.utc)
-        with TemporaryDirectory() as directory:
+        with TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
             destination = Path(directory) / "sample.tif"
             client.download_coverage(
                 "coverage", valid_time, probe.DEFAULT_BBOX, destination
@@ -138,6 +140,137 @@ class ArpegePrecipitationProbeTest(unittest.TestCase):
         self.assertEqual(subsets[-1], "time(2026-09-06T00:00:00Z)")
         self.assertNotIn('"', subsets[-1])
         self.assertEqual(session.kwargs["headers"], {"apikey": "secret-test"})
+
+    def test_getcoverage_retries_502_then_succeeds(self):
+        class Response:
+            def __init__(self, status_code):
+                self.status_code = status_code
+
+            def iter_content(self, _size):
+                yield b"TIFF"
+
+        class Session:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *_args, **_kwargs):
+                self.calls += 1
+                return Response(502 if self.calls == 1 else 200)
+
+        sleeps = []
+        session = Session()
+        client = probe.WcsClient("secret-test", session=session, sleep=sleeps.append)
+
+        stdout = io.StringIO()
+        with TemporaryDirectory() as directory, redirect_stdout(stdout):
+            client.download_coverage(
+                "coverage-502-then-ok",
+                datetime(2026, 9, 6, tzinfo=timezone.utc),
+                probe.DEFAULT_BBOX,
+                Path(directory) / "sample.tif",
+            )
+
+        self.assertEqual(session.calls, 2)
+        self.assertEqual(sleeps, [1])
+        self.assertIn("tentative 1/3, HTTP 502", stdout.getvalue())
+        self.assertIn("tentative 2/3, HTTP 200", stdout.getvalue())
+
+    def test_getcoverage_three_502_failures_report_product(self):
+        class Response:
+            status_code = 502
+
+            def iter_content(self, _size):
+                yield b""
+
+        class Session:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *_args, **_kwargs):
+                self.calls += 1
+                return Response()
+
+        sleeps = []
+        session = Session()
+        client = probe.WcsClient("secret-test", session=session, sleep=sleeps.append)
+
+        stdout = io.StringIO()
+        with TemporaryDirectory() as directory, redirect_stdout(stdout):
+            with self.assertRaisesRegex(
+                probe.ProbeError, r"coverage-always-502.*HTTP 502"
+            ):
+                client.download_coverage(
+                    "coverage-always-502",
+                    datetime(2026, 9, 6, tzinfo=timezone.utc),
+                    probe.DEFAULT_BBOX,
+                    Path(directory) / "sample.tif",
+                )
+
+        self.assertEqual(session.calls, 3)
+        self.assertEqual(sleeps, [1, 2])
+        self.assertIn("tentative 3/3, HTTP 502", stdout.getvalue())
+
+    def test_getcoverage_400_does_not_retry(self):
+        class Response:
+            status_code = 400
+
+            def iter_content(self, _size):
+                yield b""
+
+        class Session:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *_args, **_kwargs):
+                self.calls += 1
+                return Response()
+
+        session = Session()
+        client = probe.WcsClient("secret-test", session=session, sleep=lambda _delay: None)
+
+        with TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(probe.ProbeError, r"HTTP 400"):
+                client.download_coverage(
+                    "coverage-bad-request",
+                    datetime(2026, 9, 6, tzinfo=timezone.utc),
+                    probe.DEFAULT_BBOX,
+                    Path(directory) / "sample.tif",
+                )
+
+        self.assertEqual(session.calls, 1)
+
+    def test_getcoverage_messages_do_not_expose_api_key(self):
+        class Response:
+            status_code = 502
+
+            def iter_content(self, _size):
+                yield b""
+
+        class Session:
+            def get(self, *_args, **_kwargs):
+                return Response()
+
+        secret = "must-not-appear"
+        client = probe.WcsClient(
+            secret,
+            session=Session(),
+            verbose=True,
+            sleep=lambda _delay: None,
+        )
+
+        stdout = io.StringIO()
+        with TemporaryDirectory() as directory, redirect_stdout(stdout):
+            with self.assertRaises(probe.ProbeError) as caught:
+                client.download_coverage(
+                    "coverage-secret-check",
+                    datetime(2026, 9, 6, tzinfo=timezone.utc),
+                    probe.DEFAULT_BBOX,
+                    Path(directory) / "sample.tif",
+                )
+
+        self.assertNotIn(secret, stdout.getvalue())
+        self.assertNotIn(secret, str(caught.exception))
+        self.assertIn("coverageid=coverage-secret-check", stdout.getvalue())
 
     def test_analyzes_single_band_raster_without_numpy(self):
         with TemporaryDirectory() as directory:

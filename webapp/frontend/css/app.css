@@ -223,18 +223,40 @@ main {
   margin: 0.65rem 0;
 }
 
-.ai-sql-details {
+.ai-sql-details,
+.ai-source-details {
   border-top: 1px solid #cbd5cf;
   margin-top: 0.65rem;
   padding-top: 0.55rem;
   white-space: normal;
 }
 
-.ai-sql-details summary {
+.ai-sql-details summary,
+.ai-source-details summary {
   color: #466055;
   cursor: pointer;
   font-size: 0.75rem;
   font-weight: 650;
+}
+
+.ai-source {
+  display: grid;
+  gap: 0.15rem;
+  margin-top: 0.55rem;
+}
+
+.ai-source > strong {
+  font-size: 0.78rem;
+}
+
+.ai-source > code {
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+.ai-source > span {
+  color: #466055;
+  font-size: 0.75rem;
 }
 
 .ai-sql-query {

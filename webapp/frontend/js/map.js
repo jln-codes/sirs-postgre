@@ -1260,10 +1260,52 @@ function appendAiExecutedQueries(message, executedQueries) {
   message.append(details);
 }
 
+function appendAiConsultedSources(message, consultedSources) {
+  const sources = Array.isArray(consultedSources)
+    ? consultedSources.filter(
+      (source) => typeof source?.title === "string"
+        && source.title.trim()
+        && typeof source?.path === "string"
+        && source.path.trim(),
+    )
+    : [];
+  if (!sources.length) {
+    return;
+  }
+
+  const details = document.createElement("details");
+  details.className = "ai-source-details";
+  const summary = document.createElement("summary");
+  summary.textContent = `Sources consultées — ${sources.length}`;
+  details.append(summary);
+
+  sources.forEach((source) => {
+    const item = document.createElement("section");
+    item.className = "ai-source";
+    const title = document.createElement("strong");
+    title.textContent = source.title;
+    const path = document.createElement("code");
+    path.textContent = source.path;
+    item.append(title, path);
+    if (typeof source.heading === "string" && source.heading.trim()) {
+      const heading = document.createElement("span");
+      heading.textContent = source.heading;
+      item.append(heading);
+    }
+    details.append(item);
+  });
+  message.append(details);
+}
+
 function appendAiMessage(
   role,
   content,
-  { error = false, remember = true, executedQueries = [] } = {},
+  {
+    error = false,
+    remember = true,
+    executedQueries = [],
+    consultedSources = [],
+  } = {},
 ) {
   aiConversationEmpty?.remove();
   const message = document.createElement("article");
@@ -1283,6 +1325,7 @@ function appendAiMessage(
   message.append(author, body);
   if (role === "assistant") {
     appendAiExecutedQueries(message, executedQueries);
+    appendAiConsultedSources(message, consultedSources);
   }
   aiConversation.append(message);
   aiConversation.scrollTop = aiConversation.scrollHeight;
@@ -1321,6 +1364,7 @@ aiChatForm.addEventListener("submit", async (event) => {
     }
     appendAiMessage("assistant", response.answer.trim(), {
       executedQueries: response.executed_queries,
+      consultedSources: response.consulted_sources,
     });
   } catch (error) {
     console.error("Réponse de l’assistant impossible", error);

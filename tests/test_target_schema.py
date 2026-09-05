@@ -7,6 +7,7 @@ from digues_app.target.schema import (
     CONSTRAINT_DEFINITIONS,
     EXPECTED_TABLES,
     INDEX_DEFINITIONS,
+    MIGRATION_TABLES,
     SCHEMA_DDL,
     TABLE_DEFINITIONS,
     render_schema_ddl,
@@ -101,6 +102,8 @@ class TargetSchemaTest(unittest.TestCase):
                 "observations",
                 "photos",
                 "territoires_administratifs",
+                "knowledge_documents",
+                "knowledge_chunks",
                 "desordre_localisations_reperage",
             ),
         )
@@ -158,6 +161,22 @@ class TargetSchemaTest(unittest.TestCase):
                 self.assertIn("id uuid primary key", normalized(TABLE_DEFINITIONS[table]))
         ddl = normalized(" ".join(SCHEMA_DDL))
         self.assertNotIn("serial", ddl)
+
+    def test_knowledge_tables_use_uuid_jsonb_tsvector_and_gin(self):
+        documents = normalized(TABLE_DEFINITIONS["knowledge_documents"])
+        chunks = normalized(TABLE_DEFINITIONS["knowledge_chunks"])
+        self.assertIn("id uuid primary key default gen_random_uuid()", documents)
+        self.assertIn("unique (source_type, path)", documents)
+        self.assertIn("metadata jsonb", documents)
+        self.assertIn("search_vector tsvector not null", chunks)
+        self.assertIn("on delete cascade", chunks)
+        self.assertIn("unique (document_id, ordinal)", chunks)
+        self.assertIn(
+            "using gin (search_vector)",
+            normalized(INDEX_DEFINITIONS["knowledge_chunks_search_vector_idx"]),
+        )
+        self.assertNotIn("knowledge_documents", MIGRATION_TABLES)
+        self.assertNotIn("knowledge_chunks", MIGRATION_TABLES)
 
     def test_simple_uuid_primary_keys_default_to_generated_uuid(self):
         for table in (
@@ -543,6 +562,8 @@ class TargetSchemaTest(unittest.TestCase):
                 "troncons_systeme_reperage_defaut_idx",
                 "link_troncons_bornes_borne_idx",
                 "link_systemes_reperage_bornes_borne_idx",
+                "knowledge_chunks_search_vector_idx",
+                "knowledge_documents_source_type_idx",
                 "desordre_localisations_reperage_desordre_idx",
                 "desordre_localisations_reperage_troncon_idx",
                 "desordre_localisations_reperage_systeme_idx",
