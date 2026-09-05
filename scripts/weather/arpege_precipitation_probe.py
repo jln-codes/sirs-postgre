@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import struct
 import sys
+import time
 from tempfile import TemporaryDirectory
 from typing import Iterable
 from xml.etree import ElementTree
@@ -31,6 +32,9 @@ PRODUCT = "TOTAL_WATER_PRECIPITATION__GROUND_OR_WATER_SURFACE"
 PERIODS = ("P1D", "PT1H", "PT3H", "PT6H")
 DEFAULT_BBOX = (2.45, 50.40, 2.75, 50.60)
 HTTP_TIMEOUT = (15, 120)
+GETCOVERAGE_RETRY_STATUSES = {502, 503, 504}
+GETCOVERAGE_NO_RETRY_STATUSES = {400, 401, 403, 404}
+GETCOVERAGE_RETRY_DELAYS = (1, 2, 4)
 MAX_XML_BYTES = 25 * 1024 * 1024
 MAX_TIFF_BYTES = 50 * 1024 * 1024
 ROOT_DIRECTORY = Path(__file__).resolve().parents[2]
@@ -218,9 +222,18 @@ def select_common_time(descriptions: Iterable[CoverageDescription]) -> datetime:
 
 
 class WcsClient:
-    def __init__(self, api_key: str, session: requests.Session | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        session: requests.Session | None = None,
+        *,
+        verbose: bool = False,
+        sleep=time.sleep,
+    ) -> None:
         self._session = session or requests.Session()
         self._headers = {"apikey": api_key}
+        self._verbose = verbose
+        self._sleep = sleep
 
     def _get(self, operation: str, params: list[tuple[str, str]], *, stream: bool):
         try:
@@ -237,6 +250,24 @@ class WcsClient:
             status = getattr(exc.response, "status_code", None)
             suffix = f" (HTTP {status})" if status else ""
             raise ProbeError(f"Échec de {operation}{suffix}.") from exc
+
+    def _get_no_raise(
+        self,
+        operation: str,
+        params: list[tuple[str, str]],
+        *,
+        stream: bool,
+    ):
+        try:
+            return self._session.get(
+                f"{WCS_ENDPOINT}/{operation}",
+                params=params,
+                headers=self._headers,
+                timeout=HTTP_TIMEOUT,
+                stream=stream,
+            )
+        except requests.RequestException as exc:
+            raise ProbeError(f"Échec de {operation}.") from exc
 
     def _xml(self, operation: str, params: list[tuple[str, str]]) -> bytes:
         response = self._get(operation, params, stream=False)
@@ -278,7 +309,7 @@ class WcsClient:
             ("subset", f"time({_format_utc(valid_time)})"),
             ("format", "image/tiff"),
         ]
-        response = self._get("GetCoverage", params, stream=True)
+        response = self._get_coverage_with_retries(coverage_id, params)
         size = 0
         with destination.open("wb") as output:
             for chunk in response.iter_content(64 * 1024):
@@ -290,6 +321,30 @@ class WcsClient:
                 output.write(chunk)
         if size == 0:
             raise ProbeError("GetCoverage a retourné un fichier vide.")
+
+    def _get_coverage_with_retries(self, coverage_id: str, params: list[tuple[str, str]]):
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            response = self._get_no_raise("GetCoverage", params, stream=True)
+            status = response.status_code
+            print(
+                f"GetCoverage produit {coverage_id} : "
+                f"tentative {attempt}/{max_attempts}, HTTP {status}"
+            )
+            if self._verbose:
+                logical_params = "&".join(
+                    f"{name}={value}" for name, value in params
+                )
+                print(f"  WCS GetCoverage paramètres : {logical_params}")
+            if status < 400:
+                return response
+            if status in GETCOVERAGE_NO_RETRY_STATUSES:
+                raise ProbeError(f"Échec de GetCoverage pour {coverage_id} (HTTP {status}).")
+            if status not in GETCOVERAGE_RETRY_STATUSES or attempt == max_attempts:
+                raise ProbeError(f"Échec de GetCoverage pour {coverage_id} (HTTP {status}).")
+            self._sleep(GETCOVERAGE_RETRY_DELAYS[attempt - 1])
+
+        raise ProbeError(f"Échec de GetCoverage pour {coverage_id}.")
 
 
 def _metadata_by_domain(item) -> dict[str, dict[str, str]]:
@@ -422,6 +477,11 @@ def _print_table(summaries: list[RasterSummary]) -> None:
 
 def _print_relationships(summaries: list[RasterSummary]) -> None:
     by_product = {summary.product: summary for summary in summaries}
+    missing = [period for period in PERIODS if period not in by_product]
+    if missing:
+        print("\nRelations au pixel central : indisponibles.")
+        print("- Produits non obtenus : " + ", ".join(missing))
+        return
     ordered = [by_product[period].center for period in ("PT1H", "PT3H", "PT6H", "P1D")]
     monotonic = all(left <= right for left, right in zip(ordered, ordered[1:]))
     print("\nRelations au pixel central :")
@@ -462,20 +522,25 @@ def run_probe(
     print(f"BBox : {bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}")
 
     summaries: list[RasterSummary] = []
+    failed_products: list[tuple[str, str, str]] = []
     with TemporaryDirectory(prefix="sirs-arpege-probe-") as directory:
         temporary_directory = Path(directory)
         for period in PERIODS:
             coverage = selected[period]
             destination = temporary_directory / f"{period}.tif"
-            client.download_coverage(coverage.coverage_id, valid_time, bbox, destination)
-            summaries.append(
-                analyze_raster(
-                    destination,
-                    period,
-                    coverage.coverage_id,
-                    descriptions[period].unit,
+            try:
+                client.download_coverage(coverage.coverage_id, valid_time, bbox, destination)
+                summaries.append(
+                    analyze_raster(
+                        destination,
+                        period,
+                        coverage.coverage_id,
+                        descriptions[period].unit,
+                    )
                 )
-            )
+            except ProbeError as exc:
+                failed_products.append((period, coverage.coverage_id, str(exc)))
+                print(f"Produit non obtenu : {period} ({coverage.coverage_id}) : {exc}")
 
         if temporal_samples:
             candidates = [
@@ -487,20 +552,34 @@ def run_probe(
             for index, sample_time in enumerate(candidates, start=1):
                 destination = temporary_directory / f"P1D-temporal-{index}.tif"
                 coverage = selected["P1D"]
-                client.download_coverage(
-                    coverage.coverage_id, sample_time, bbox, destination
-                )
-                sample = analyze_raster(
-                    destination,
-                    "P1D",
-                    coverage.coverage_id,
-                    descriptions["P1D"].unit,
-                )
-                print(f"- {_format_utc(sample_time)} : centre={sample.center:.10g}")
+                try:
+                    client.download_coverage(
+                        coverage.coverage_id, sample_time, bbox, destination
+                    )
+                    sample = analyze_raster(
+                        destination,
+                        "P1D",
+                        coverage.coverage_id,
+                        descriptions["P1D"].unit,
+                    )
+                    print(f"- {_format_utc(sample_time)} : centre={sample.center:.10g}")
+                except ProbeError as exc:
+                    failed_products.append(
+                        (f"P1D temporal {index}", coverage.coverage_id, str(exc))
+                    )
+                    print(
+                        f"- {_format_utc(sample_time)} : produit non obtenu "
+                        f"({coverage.coverage_id}) : {exc}"
+                    )
 
     print()
-    _print_table(summaries)
-    _print_relationships(summaries)
+    if summaries:
+        _print_table(summaries)
+        _print_relationships(summaries)
+    if failed_products:
+        print("\nProduits non obtenus :")
+        for period, coverage_id, error in failed_products:
+            print(f"- {period} ({coverage_id}) : {error}")
     print("\nMétadonnées complètes :")
     print(json.dumps([asdict(summary) for summary in summaries], indent=2, ensure_ascii=False))
     if json_output:
@@ -525,6 +604,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--json-output", type=Path, help="Écrire aussi le détail en JSON.")
     parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Afficher les paramètres WCS utilisés sans secret.",
+    )
+    parser.add_argument(
         "--temporal-samples",
         type=int,
         default=0,
@@ -547,7 +631,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         run_probe(
-            WcsClient(api_key),
+            WcsClient(api_key, verbose=arguments.verbose),
             arguments.bbox,
             json_output=arguments.json_output,
             temporal_samples=arguments.temporal_samples,
