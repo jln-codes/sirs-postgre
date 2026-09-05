@@ -155,6 +155,13 @@ expressions de coordonnées et l'absence de groupe de formulaire ne contenant
 qu'un seul élément. Il échoue si une couche PostgreSQL est invalide ou si la
 relecture diffère de la spécification.
 
+## Limite QGIS
+
+Les formulaires QGIS ont rapidement montré leurs limites pour la saisie de
+données sur cette base complexe. C'est la raison du développement de l'application
+web. Le développement de la sortie QGIS n'a pas été poursuivi et sert surtout
+à controler visuellement la structure de la base et les donnnées exportées.
+
 ## Limite QField
 
 Le fond OpenStreetMap est destiné exclusivement à la consultation connectée.
